@@ -1,369 +1,294 @@
 
-mport pandas
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LinearRegression
+from sklearn.metrics import classification_report, accuracy_score
+from sklearn.svm import SVC
+import os.path
 import numpy as np
+from keras.preprocessing import image
+import cv2
+import dlib
+from cvxopt import matrix as cvxopt_matrix
+from cvxopt import solvers as cvxopt_solvers
+from sklearn.model_selection import cross_val_score
 import matplotlib.pyplot as plt
-from sklearn import datasets, linear_model
-from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.model_selection import learning_curve
+from sklearn.datasets import load_digits
+from tempfile import TemporaryFile
+
+global basedir, image_paths, target_size
+basedir = './dataset_AMLS_19-20'
+images_dir = os.path.join(basedir, 'celeba/img')
+labels_filename = 'labels.csv'
+
+detector = dlib.get_frontal_face_detector()
+predictor = dlib.shape_predictor('shape_predictor_68_face_landmarks.dat')
 
 
-# sklearn functions implementation => linearRegPredic function
+def shape_to_np(shape, dtype="int"):
+    # initialize the list of (x, y)-coordinates
+    coords = np.zeros((shape.num_parts, 2), dtype=dtype)
 
-def linearRegrPredict(xTrain, yTrain, xTest):
-    # Create linear regression object
+    # loop over all facial landmarks and convert them
+    # to a 2-tuple of (x, y)-coordinates
+    for i in range(0, shape.num_parts):
+        coords[i] = (shape.part(i).x, shape.part(i).y)
 
-    regr = LinearRegression()
+    # return the list of (x, y)-coordinates
+    return coords
 
-    # Train the model using the training sets
 
-    regr.fit(xTrain, yTrain)
-    # Make predictions using the testing set
+def rect_to_bb(rect):
+    # take a bounding predicted by dlib and convert it
+    # to the format (x, y, w, h) as we would normally do
+    # with OpenCV
+    x = rect.left()
+    y = rect.top()
+    w = rect.right() - x
+    h = rect.bottom() - y
 
-    y_pred = regr.predict(xTest)
-    beta = regr.coef_
-    alpha = regr.intercept_
+    # return a tuple of (x, y, w, h)
+    return (x, y, w, h)
 
-    # print("Accuracy Score:",regr.score(xTest,yTest))
 
+def run_dlib_shape(image):
+    # in this function we load the image, detect the landmarks of the face, and then return the image and the landmarks
+    # load the input image, resize it, and convert it to grayscale
+    resized_image = image.astype('uint8')
+
+    gray = cv2.cvtColor(resized_image, cv2.COLOR_BGR2GRAY)
+    gray = gray.astype('uint8')
+
+    # detect faces in the grayscale image
+    rects = detector(gray, 1)
+    num_faces = len(rects)
+
+    if num_faces == 0:
+        return None, resized_image
+
+    face_areas = np.zeros((1, num_faces))
+    face_shapes = np.zeros((136, num_faces), dtype=np.int64)
+
+    # loop over the face detections
+    for (i, rect) in enumerate(rects):
+        # determine the facial landmarks for the face region, then
+        # convert the facial landmark (x, y)-coordinates to a NumPy
+        # array
+        temp_shape = predictor(gray, rect)
+        temp_shape = shape_to_np(temp_shape)
+
+        # convert dlib's rectangle to a OpenCV-style bounding box
+        # [i.e., (x, y, w, h)],
+        #   (x, y, w, h) = face_utils.rect_to_bb(rect)
+        (x, y, w, h) = rect_to_bb(rect)
+        face_shapes[:, i] = np.reshape(temp_shape, [136])
+        face_areas[0, i] = w * h
+    # find largest face and keep
+    dlibout = np.reshape(np.transpose(face_shapes[:, np.argmax(face_areas)]), [68, 2])
+
+    return dlibout, resized_image
+
+
+def extract_features_labels():
+    """
+    This funtion extracts the landmarks features for all images in the folder 'dataset/celeba'.
+    It also extracts the gender label for each image.
+    :return:
+        landmark_features:  an array containing 68 landmark points for each image in which a face was detected
+        gender_labels:      an array containing the gender label (male=0 and female=1) for each image in
+                            which a face was detected
+    """
+    image_paths = [os.path.join(images_dir, l) for l in os.listdir(images_dir)]
+    target_size = None
+    labels_file = open(os.path.join(basedir, labels_filename), 'r')
+    lines = labels_file.readlines()
+    gender_labels = {line.split()[0]: int(line.split()[2]) for line in lines[1:]}
+    if os.path.isdir(images_dir):
+        all_features = []
+        all_labels = []
+        for img_path in image_paths:
+            file_name = img_path.split('.')[1].split('/')[-1]
+
+            # load image
+            img = image.img_to_array(
+                image.load_img(img_path,
+                               target_size=target_size,
+                               interpolation='bicubic'))
+            features, _ = run_dlib_shape(img)
+            if features is not None:
+                all_features.append(features)
+                all_labels.append(gender_labels[file_name])
+
+    landmark_features = np.array(all_features)
+    gender_labels = (np.array(all_labels) + 1) / 2  # simply converts the -1 into 0, so male=0 and female=1
+    return landmark_features, gender_labels
+
+
+def get_data():
+    X, y = extract_features_labels()
+    Y = np.array([y, -(y - 1)]).T
+    tr_X = X[:3840]
+    tr_Y = Y[:3840]
+    te_X = X[3840:]
+    te_Y = Y[3840:]
+    tr_X = tr_X.reshape((3840, 68 * 2))
+    tr_Y = list(zip(*tr_Y))[0]
+    te_X = te_X.reshape((960, 68 * 2))
+    te_Y = list(zip(*te_Y))[0]
+    np.save('A1_train_x_data.npy', tr_X)
+    np.save('A1_train_y_data.npy', tr_Y)
+    np.save('A1_test_x_data.npy', te_X)
+    np.save('A1_test_y_data.npy', te_Y)
+    return X, Y
+
+
+def img_SVM(training_images, training_labels, test_images, test_labels):
+    LinearClassifier = SVC(C=1, kernel='linear')
+    LinearClassifier.fit(training_images, training_labels)
+    LinearPred = LinearClassifier.predict(test_images)
+    print("Linear Classifier Accuracy:", accuracy_score(test_labels, LinearPred))
+
+
+def plot_learning_curve(x, y):
+    digits = load_digits()
+    LinearClassifier = SVC(C=1, kernel='linear')
+    y = np.array(y)
+    y = np.where(y == 0, -1, y)
+    y = np.where(y == 1, 1, y)
+    y = y.astype(np.int8)
+    indices = np.arange(y.shape[0])
+    np.random.shuffle(indices)
+    x, y = x[indices], y[indices]
+    train_sizes = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+    train_sizes, train_scores, test_scores = learning_curve(LinearClassifier, x, y, cv=10, scoring='accuracy',
+                                                            n_jobs=-1,
+                                                            train_sizes=train_sizes)
+    train_scores_mean = np.mean(train_scores, axis=1)
+    train_scores_std = np.std(train_scores, axis=1)
+    test_scores_mean = np.mean(test_scores, axis=1)
+    test_scores_std = np.std(test_scores, axis=1)
+    plt.figure(figsize=(20, 5))
+    plt.fill_between(train_sizes, train_scores_mean - train_scores_std,
+                     train_scores_mean + train_scores_std, alpha=0.1,
+                     color="r")
+    plt.fill_between(train_sizes, test_scores_mean - test_scores_std,
+                     test_scores_mean + test_scores_std, alpha=0.1,
+                     color="g")
+    plt.plot(train_sizes, train_scores_mean, 'o-', color="r",
+             label="Training score")
+    plt.plot(train_sizes, test_scores_mean, 'o-', color="g",
+             label="Cross-validation score")
+    plt.legend(loc="best")
+    plt.grid()
+    plt.show()
+    return 0
+
+
+def cross_validation(LinearClassifier, training_images, training_labels):
+    C_value = np.arange(1, 20, 1)
+    scores = []
+    scoresSTD = []
+    for C in C_value:
+        LinearClassifier.C = C
+        current_score = cross_val_score(LinearClassifier, training_images, training_labels, n_jobs=1)
+        scores.append(np.mean(current_score))
+        scoresSTD.append(np.std(current_score))
+    pass
+    plt.figure(figsize=(10, 10))
+    plt.plot(C_value, scores)
+    plt.plot(C_value, np.array(scores) + np.array(scoresSTD), 'b--')
+    plt.plot(C_value, np.array(scores) - np.array(scoresSTD), 'b--')
+    plt.xticks(np.arange(0, 20, 1))
+    plt.xlabel('C parameter')
+    plt.yticks(np.arange(0, 1, 0.1))
+    plt.ylabel('Cross Validation accuracy')
+    plt.show()
+    scores.clear()
+    scoresSTD.clear()
+    Models = ['linear', 'poly', 'rbf', 'sigmoid']
+    for i in range(len(Models)):
+        LinearClassifier.kernel = Models[i]
+        current_score = cross_val_score(LinearClassifier, training_images, training_labels, n_jobs=1)
+        scores.append(np.mean(current_score))
+        scoresSTD.append(np.std(current_score))
+    pass
+    plt.figure(figsize=(10, 10))
+    plt.plot(Models, scores)
+    plt.plot(Models, np.array(scores) + np.array(scoresSTD), 'b--')
+    plt.plot(Models, np.array(scores) - np.array(scoresSTD), 'b--')
+    plt.xlabel('C parameter')
+    plt.yticks(np.arange(0, 1, 0.1))
+    plt.ylabel('Cross Validation accuracy')
+    plt.show()
+
+
+def Classifier(X, Y, test_X):
+    y_data = []
+    for i in range(len(Y)):
+        if Y[i] == 1.0:
+            y_data.append(Y[i])
+        else:
+            y_data.append(-1)
+    y = np.array(y_data)
+
+    # Initializing values and computing H. Note the 1. to force to float type
+    C = 1
+    m, n = X.shape
+    y = y.reshape(-1, 1) * 1.
+    X_dash = y * X
+    H = np.dot(X_dash, X_dash.T) * 1.
+
+    # Converting into cvxopt format - as previously
+    P = cvxopt_matrix(H)
+    q = cvxopt_matrix(-np.ones((m, 1)))
+    G = cvxopt_matrix(np.vstack((np.eye(m) * -1, np.eye(m))))
+    h = cvxopt_matrix(np.hstack((np.zeros(m), np.ones(m) * C)))
+    A = cvxopt_matrix(y.reshape(1, -1))
+    b = cvxopt_matrix(np.zeros(1))
+
+    # Run solver
+    sol = cvxopt_solvers.qp(P, q, G, h, A, b)
+    alphas = np.array(sol['x'])
+
+    # ==================Computing and printing parameters===============================#
+    w = ((y * alphas).T @ X).reshape(-1, 1)
+    S = (alphas > 0).flatten()
+    b = y[S] - np.dot(X[S], w)
+    w = w.reshape(1, 136)
+    print('Alphas = ', alphas[alphas > 1e-4])
+    print('w = ', w.flatten())
+    b = np.sum(b) / 3840
+    y_pred = np.dot(w, test_X.T) + b
     return y_pred
 
 
-# My own simple Linear Regression Prediction Function
-
-def sampleMean(Sample_data, sample_size):
-    sum = 0
-    for i in range(sample_size):
-        sum = sum + Sample_data[i]
-    sample_mean = sum / sample_size
-    return sample_mean
-
-
-def CalculatingBeta(XTrain1, YTrain1, x_train1_sample_mean, y_train1_sample_mean, sample_size):
-    numerator_sum = 0
-    for i in range(sample_size):
-        numerator_sum = numerator_sum + XTrain1[i] * (YTrain1[i] - y_train1_sample_mean)
-    denominator_sum = 0
-    for i in range(sample_size):
-        denominator_sum = denominator_sum + XTrain1[i] * (XTrain1[i] - x_train1_sample_mean)
-    beta = numerator_sum / denominator_sum
-    return beta
-
-
-def MyRegFunction(XTrain1, YTrain1, XTest1):
-    # total data 260 multiplied by training set proportion
-
-    sample_size = 195
-    x_train1_sample_mean = sampleMean(XTrain1, sample_size)
-    y_train1_sample_mean = sampleMean(YTrain1, sample_size)
-    beta = CalculatingBeta(XTrain1, YTrain1, x_train1_sample_mean, y_train1_sample_mean, sample_size)
-    alpha = y_train1_sample_mean - beta * x_train1_sample_mean
-    beta = round(beta, 6)
-    alpha = round(alpha, 6)
-
-    y_pred = alpha + beta * xTest1
-    # rounding y_pred to 6 digits
-    # total data 260 multiplied by test set proportion
-    for i in range(260 - sample_size):
-        y_pred[i] = round(y_pred[i], 6)
-
-    print("My regression alpha = ", alpha)
-    print("My regression beta  = ", beta)
-    return y_pred
-
-
-# Solution Regression function from Jupyter Notebook
-
-def paramEstimates(xTrain, yTrain):
-    beta = np.sum(np.multiply(xTrain, (np.add(yTrain, -np.mean(yTrain))))) / np.sum(
-        np.multiply(xTrain, (np.add(xTrain, -np.mean(xTrain)))))
-    xTrain1 = np.array(np.mean(xTrain)).flatten()
-    yTrain1 = np.array(np.mean(yTrain)).flatten()
-    alpha = yTrain1 - beta * xTrain1
-    print("Jupyter alpha", alpha)
-    print("Jupyter beta", beta)
-    return alpha, beta
-
-
-def linearRegrNEWPredict(xTrain, yTrain, xTest):
-    alpha, beta = paramEstimates(xTrain, yTrain)
-    y_pred = alpha + beta * xTest
-    return y_pred
-
-
-# My SSR function
-def Small_Res_Square_Value(yTest, yPrediction, TestSample_size):
-    sum = 0.00000000000
-    for i in range(TestSample_size):
-        sum = sum + (yTest[i] - yPrediction[i]) * (yTest[i] - yPrediction[i])
-
-    return sum
-
-
-def SSR(yTest, y_pred):
-    ssr = np.sum(np.multiply((np.add(yTest, -y_pred)), (np.add(yTest, -y_pred))))
-    return ssr
-
-
-# Gradient Descent
-
-def GDparamEstimates(xTrain, yTrain, xTest):
-    alpha = 0
-    beta = 0
-    n = len(xTrain)
-    iterations = 100000
-    AlphaLearning_rate = 0.001
-    BetaLearning_rate = 0.000000000001
-    for i in range(iterations):
-        y_predicted = alpha + beta * xTrain
-        SumAlphaGrad = -(2 / n) * np.sum(yTrain - y_predicted)
-        SumBetaGrad = -(2 / n) * np.sum(xTrain * (yTrain - y_predicted))
-        alpha = alpha - AlphaLearning_rate * SumAlphaGrad
-        beta = beta - BetaLearning_rate * SumBetaGrad
-    y_predicted = alpha + beta * xTest
-    print(" GD alpha = ", alpha)
-    print("GD beta = ", beta)
-    return y_predicted
-
-
-# Loading the CSV file
-
-houseprice = pandas.read_csv('regression_data.csv')
-houseprice = houseprice[['Price (Older)', 'Price (New)']]  # Choose 2 columns
-
-# Split the data
-
-X = houseprice[['Price (Older)']]
-Y = houseprice[['Price (New)']]
-
-# Split the data into training and testing(75% training and 25% testing data)
-
-xTrain, xTest, yTrain, yTest = train_test_split(X, Y)
-
-# Transform dataframes to numpy arrays
-xTrain1 = np.array(xTrain.values).flatten()
-xTest1 = np.array(xTest.values).flatten()
-yTrain1 = np.array(yTrain.values).flatten()
-yTest1 = np.array(yTest.values).flatten()
-Array = np.array(xTest.values).flatten()
-ypredGD = GDparamEstimates(xTrain1, yTrain1, xTest1)
-
-y_pred1 = MyRegFunction(xTrain1, yTrain1, xTest1)
-y_predSklearn = linearRegrPredict(xTrain, yTrain, xTest)
-y_predJupyter = linearRegrNEWPredict(xTrain, yTrain, xTest)
-test_sample_size = 65
-SSR_of_y_pred1 = SSR(yTest1, y_pred1)
-print("SSR of my Simple Regression function: ", SSR_of_y_pred1)
-
-SklearnSSR = SSR(yTest, y_predSklearn)
-print("Scikit-learn linear regression SSR: %.4f" % SklearnSSR)
-
-Jupyter = SSR(yTest, y_predJupyter)
-print("Jupyter SSR: %.4f" % Jupyter)
-
-SSRGD = SSR(yTest1, ypredGD)
-print(" Gradient descent: ", SSRGD)
-
-# y_pred = linearRegrPredict(xTrain, yTrain, xTest)
-# print(y_pred)
-
-# Plot testing set predictions
-plt.title('My Regression')
-plt.scatter(xTest, yTest)
-plt.plot(xTest1, y_pred1, 'r-')
-plt.show()
-
-plt.title('Sklearn Regression')
-plt.scatter(xTest, yTest)
-plt.plot(xTest, y_predSklearn, 'r-')
-plt.show()
-
-plt.title('Jupiter Solution Regression')
-plt.scatter(xTest, yTest)
-plt.plot(xTest1, y_predJupyter, 'r-')
-plt.show()
-print("Hello")
-
-# EXample of my Neural Network
-import numpy
-import scipy.special
-import matplotlib.pyplot as plt
-
-
-# neural network class definition
-
-class neuralNetwork:
-
-    # initialise the neural network
-    def __init__(self, inputN, hiddenN, outputN, lr):
-        # set number of nodes in each input, hidden, output layer
-        self.inodes = inputN
-        self.hnodes = hiddenN
-        self.onodes = outputN
-
-        # link weight matrices, wih and who
-        # weights inside the arrays are w_i_j, where link is from node i to node j in the next layer
-        # w11 w21
-        # w12 w22 etc
-        self.wih = numpy.random.normal(0.0, pow(self.inodes, -0.5), (self.hnodes, self.inodes))
-        self.who = numpy.random.normal(0.0, pow(self.hnodes, -0.5), (self.onodes, self.hnodes))
-
-        # learning rate
-        self.lr = lr
-
-        # activation function is the sigmoid function
-        self.activation_function = lambda x: scipy.special.expit(x)
-
-        pass
-
-    # train the neural network
-    def train(self, inputs_list, targets_list):
-        # convert inputs list to 2d array
-        inputs = numpy.array(inputs_list, ndmin=2).T
-        targets = numpy.array(targets_list, ndmin=2).T
-
-        # calculate signals into hidden layer
-        hidden_inputs = numpy.dot(self.wih, inputs)
-        # calculate the signals emerging from hidden layer
-        hidden_outputs = self.activation_function(hidden_inputs)
-
-        # calculate signals into final output layer
-        final_inputs = numpy.dot(self.who, hidden_outputs)
-        # calculate the signals emerging from final output layer
-        final_outputs = self.activation_function(final_inputs)
-
-        # output layer error is the (target - actual)
-        output_errors = targets - final_outputs
-        # hidden layer error is the output_errors, split by weights, recombined at hidden nodes
-        hidden_errors = numpy.dot(self.who.T, output_errors)
-
-        # update the weights for the links between the hidden and output layers
-        self.who += self.lr * numpy.dot((output_errors * final_outputs * (1.0 - final_outputs)),
-                                        numpy.transpose(hidden_outputs))
-
-        # update the weights for the links between the input and hidden layers
-        self.wih += self.lr * numpy.dot((hidden_errors * hidden_outputs * (1.0 - hidden_outputs)),
-                                        numpy.transpose(inputs))
-
-        pass
-
-    # query the neural network
-    def query(self, inputs_list):
-        # convert inputs list to 2d array
-        inputs = numpy.array(inputs_list, ndmin=2).T
-
-        # calculate signals into hidden layer
-        hidden_inputs = numpy.dot(self.wih, inputs)
-        # calculate the signals emerging from hidden layer
-        hidden_outputs = self.activation_function(hidden_inputs)
-
-        # calculate signals into final output layer
-        final_inputs = numpy.dot(self.who, hidden_outputs)
-        # calculate the signals emerging from final output layer
-        final_outputs = self.activation_function(final_inputs)
-
-        return final_outputs
-
-
-# number of input, hidden and output nodes
-input_nodes = 784
-hidden_nodes = 100
-output_nodes = 10
-
-# learning rate
-learning_rate = 0.1
-
-# create instance of neural network
-n = neuralNetwork(input_nodes, hidden_nodes, output_nodes, learning_rate)
-training_data_file = open("DataSet/mnist_train.csv", 'r')
-training_data_list = training_data_file.readlines()
-training_data_file.close()
-
-# train the neural network
-
-# epochs is the number of times the training data set is used for training
-epochs = 5
-
-for e in range(epochs):
-    # go through all records in the training data set
-    for record in training_data_list:
-        # split the record by the ',' commas
-        all_values = record.split(',')
-        # scale and shift the inputs
-        inputs = (numpy.asfarray(all_values[1:]) / 255.0 * 0.99) + 0.01
-        # create the target output values (all 0.01, except the desired label which is 0.99)
-        targets = numpy.zeros(output_nodes) + 0.01
-        # all_values[0] is the target label for this record
-        targets[int(all_values[0])] = 0.99
-        n.train(inputs, targets)
-        pass
-    pass
-
-# load the mnist test data CSV file into a list
-test_data_file = open("DataSet/mnist_test.csv", 'r')
-test_data_list = test_data_file.readlines()
-test_data_file.close()
-
-# test the neural network
-
-# scorecard for how well the network performs, initially empty
-scorecard = []
-
-# go through all the records in the test data set
-for record in test_data_list:
-    # split the record by the ',' commas
-    all_values = record.split(',')
-    # correct answer is first value
-    correct_label = int(all_values[0])
-    # scale and shift the inputs
-    inputs = (numpy.asfarray(all_values[1:]) / 255.0 * 0.99) + 0.01
-    # query the network
-    outputs = n.query(inputs)
-    # the index of the highest value corresponds to the label
-    label = numpy.argmax(outputs)
-    # append correct or incorrect to list
-    if label == correct_label:
-        # network's answer matches correct answer, add 1 to scorecard
-        scorecard.append(1)
-    else:
-        # network's answer doesn't match correct answer, add 0 to scorecard
-        scorecard.append(0)
-        pass
-
-    pass
-
-# calculate the performance score, the fraction of correct answers
-scorecard_array = numpy.asarray(scorecard)
-print("performance = ", scorecard_array.sum() / scorecard_array.size)
-
-# test the neural network
-
-# scorecard for how well the network performs, initially empty
-scorecard = []
-
-# go through all the records in the test data set
-for record in test_data_list:
-    # split the record by the ',' commas
-    all_values = record.split(',')
-    # correct answer is first value
-    correct_label = int(all_values[0])
-    # scale and shift the inputs
-    inputs = (numpy.asfarray(all_values[1:]) / 255.0 * 0.99) + 0.01
-    # query the network
-    outputs = n.query(inputs)
-    # the index of the highest value corresponds to the label
-    label = numpy.argmax(outputs)
-    # append correct or incorrect to list
-    if label == correct_label:
-        # network's answer matches correct answer, add 1 to scorecard
-        scorecard.append(1)
-    else:
-        # network's answer doesn't match correct answer, add 0 to scorecard
-        scorecard.append(0)
-        pass
-
-    pass
-
-# calculate the performance score, the fraction of correct answers
-scorecard_array = numpy.asarray(scorecard)
-print("performance = ", scorecard_array.sum() / scorecard_array.size)
+def Poly_data_mapping(x_train, y_train):
+    copy = x_train.copy()
+    for i in range(0, 136, 2):
+        x_train[:, i] = x_train[:, i] ** 2
+    for i in range(1, 136, 2):
+        x_train[:, i] = np.sqrt(2) * copy[:, 0] * x_train[:, 1]
+    for i in range(2, 204, 2):
+        np.insert(x_train, i, copy[:, i - 1] ** 2, axis=1)
+
+    return x_train
+
+
+def img_new_SVM(training_images, training_labels, test_images, test_labels):
+    y_pred = Classifier(training_images, training_labels, test_images)
+    Y_pred = []
+    Test_label = []
+    for i in range(960):
+        Test_label.append(test_labels[i])
+        if y_pred[0][i] < 0:
+            Y_pred.append(0)
+        else:
+            Y_pred.append(1)
+    print("My Linear Classifier Accuracy:", accuracy_score(Test_label, Y_pred))
+
+
+# Loading the data file
+training_images = np.load('A1_train_x_data.npy')
+training_labels = np.load('A1_train_y_data.npy')
+test_images = np.load('A1_test_x_data.npy')
+test_labels = np.load('A1_test_y_data.npy')
+img_SVM(training_images, training_labels, test_images, test_labels)
+img_new_SVM(training_images, training_labels, test_images, test_labels)
