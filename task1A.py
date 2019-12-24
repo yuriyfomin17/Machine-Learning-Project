@@ -1,171 +1,72 @@
 
-from sklearn.metrics import classification_report, accuracy_score
 from sklearn.svm import SVC
-import os.path
-import numpy as np
-from keras.preprocessing import image
-import cv2
-import dlib
 from cvxopt import matrix as cvxopt_matrix
 from cvxopt import solvers as cvxopt_solvers
-from sklearn.model_selection import cross_val_score
 import matplotlib.pyplot as plt
 from sklearn.model_selection import learning_curve
 from sklearn.datasets import load_digits
-from tempfile import TemporaryFile
-
-global basedir, image_paths, target_size
-basedir = './dataset_AMLS_19-20'
-images_dir = os.path.join(basedir, 'celeba/img')
-labels_filename = 'labels.csv'
-
-detector = dlib.get_frontal_face_detector()
-predictor = dlib.shape_predictor('shape_predictor_68_face_landmarks.dat')
-
-
-def shape_to_np(shape, dtype="int"):
-    # initialize the list of (x, y)-coordinates
-    coords = np.zeros((shape.num_parts, 2), dtype=dtype)
-
-    # loop over all facial landmarks and convert them
-    # to a 2-tuple of (x, y)-coordinates
-    for i in range(0, shape.num_parts):
-        coords[i] = (shape.part(i).x, shape.part(i).y)
-
-    # return the list of (x, y)-coordinates
-    return coords
+from sklearn.preprocessing import StandardScaler  # doctest: +SKIP
+import numpy as np
+from sklearn.metrics import classification_report, accuracy_score
+from sklearn.decomposition import PCA
+from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import train_test_split
+from sklearn.model_selection import validation_curve
+import itertools
+import confusion_matrix
 
 
-def rect_to_bb(rect):
-    # take a bounding predicted by dlib and convert it
-    # to the format (x, y, w, h) as we would normally do
-    # with OpenCV
-    x = rect.left()
-    y = rect.top()
-    w = rect.right() - x
-    h = rect.bottom() - y
+def img_SVM(training_data, training_labels, test_data, test_labels):
+    # best parameters are given to SVM
+    LinearClassifier = SVC(C=0.35111917342151344, kernel='linear')
 
-    # return a tuple of (x, y, w, h)
-    return (x, y, w, h)
+    # Model is trained on training data
+    LinearClassifier.fit(training_data, training_labels)
 
+    # Training predictions are given
+    train_predictions = LinearClassifier.predict(training_data)
 
-def run_dlib_shape(image):
-    # in this function we load the image, detect the landmarks of the face, and then return the image and the landmarks
-    # load the input image, resize it, and convert it to grayscale
-    resized_image = image.astype('uint8')
+    # Test predictions are given
+    test_predictions = LinearClassifier.predict(test_data)
 
-    gray = cv2.cvtColor(resized_image, cv2.COLOR_BGR2GRAY)
-    gray = gray.astype('uint8')
+    # Train predictions accuracy is shown
+    print("Train Accuracy: ", accuracy_score(training_labels, train_predictions))
 
-    # detect faces in the grayscale image
-    rects = detector(gray, 1)
-    num_faces = len(rects)
+    # Cross validation accuracy and report is given on cv=10
+    Validation_Score = cross_val_score(LinearClassifier, training_data, training_labels, cv=10)
+    print("Separate Validation score  for each: ", Validation_Score)
+    print("Validation score mean over cv=10: ", Validation_Score.mean())
 
-    if num_faces == 0:
-        return None, resized_image
-
-    face_areas = np.zeros((1, num_faces))
-    face_shapes = np.zeros((136, num_faces), dtype=np.int64)
-
-    # loop over the face detections
-    for (i, rect) in enumerate(rects):
-        # determine the facial landmarks for the face region, then
-        # convert the facial landmark (x, y)-coordinates to a NumPy
-        # array
-        temp_shape = predictor(gray, rect)
-        temp_shape = shape_to_np(temp_shape)
-
-        # convert dlib's rectangle to a OpenCV-style bounding box
-        # [i.e., (x, y, w, h)],
-        #   (x, y, w, h) = face_utils.rect_to_bb(rect)
-        (x, y, w, h) = rect_to_bb(rect)
-        face_shapes[:, i] = np.reshape(temp_shape, [136])
-        face_areas[0, i] = w * h
-    # find largest face and keep
-    dlibout = np.reshape(np.transpose(face_shapes[:, np.argmax(face_areas)]), [68, 2])
-
-    return dlibout, resized_image
+    # Test final predictions accuracy is given
+    print("Test Accuracy: ", accuracy_score(test_labels, test_predictions))
+    print("Test report: ", classification_report(test_labels, test_predictions))
+    return test_predictions, LinearClassifier
 
 
-def extract_features_labels():
-    """
-    This funtion extracts the landmarks features for all images in the folder 'dataset/celeba'.
-    It also extracts the gender label for each image.
-    :return:
-        landmark_features:  an array containing 68 landmark points for each image in which a face was detected
-        gender_labels:      an array containing the gender label (male=0 and female=1) for each image in
-                            which a face was detected
-    """
-    image_paths = [os.path.join(images_dir, l) for l in os.listdir(images_dir)]
-    target_size = None
-    labels_file = open(os.path.join(basedir, labels_filename), 'r')
-    lines = labels_file.readlines()
-    gender_labels = {line.split()[0]: int(line.split()[2]) for line in lines[1:]}
-    if os.path.isdir(images_dir):
-        all_features = []
-        all_labels = []
-        for img_path in image_paths:
-            file_name = img_path.split('.')[1].split('/')[-1]
-
-            # load image
-            img = image.img_to_array(
-                image.load_img(img_path,
-                               target_size=target_size,
-                               interpolation='bicubic'))
-            features, _ = run_dlib_shape(img)
-            if features is not None:
-                all_features.append(features)
-                all_labels.append(gender_labels[file_name])
-
-    landmark_features = np.array(all_features)
-    gender_labels = (np.array(all_labels) + 1) / 2  # simply converts the -1 into 0, so male=0 and female=1
-    return landmark_features, gender_labels
-
-
-def get_data():
-    X, y = extract_features_labels()
-    Y = np.array([y, -(y - 1)]).T
-    tr_X = X[:3840]
-    tr_Y = Y[:3840]
-    te_X = X[3840:]
-    te_Y = Y[3840:]
-    tr_X = tr_X.reshape((3840, 68 * 2))
-    tr_Y = list(zip(*tr_Y))[0]
-    te_X = te_X.reshape((960, 68 * 2))
-    te_Y = list(zip(*te_Y))[0]
-    np.save('A1_train_x_data.npy', tr_X)
-    np.save('A1_train_y_data.npy', tr_Y)
-    np.save('A1_test_x_data.npy', te_X)
-    np.save('A1_test_y_data.npy', te_Y)
-    return X, Y
-
-
-def img_SVM(training_images, training_labels, test_images, test_labels):
-    LinearClassifier = SVC(C=1, kernel='linear')
-    LinearClassifier.fit(training_images, training_labels)
-    LinearPred = LinearClassifier.predict(test_images)
-    print("Linear Classifier Accuracy:", accuracy_score(test_labels, LinearPred))
-
-
-def plot_learning_curve(x, y):
-    digits = load_digits()
-    LinearClassifier = SVC(C=1, kernel='linear')
-    y = np.array(y)
-    y = np.where(y == 0, -1, y)
-    y = np.where(y == 1, 1, y)
-    y = y.astype(np.int8)
-    indices = np.arange(y.shape[0])
+def plot_learning_curve(x_train, y_train):
+    LinearClassifier = SVC(C=0.35111917342151344, kernel='linear')
+    y_train = np.array(y_train)
+    y_train = y_train.astype(np.int8)
+    indices = np.arange(y_train.shape[0])
     np.random.shuffle(indices)
-    x, y = x[indices], y[indices]
-    train_sizes = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-    train_sizes, train_scores, test_scores = learning_curve(LinearClassifier, x, y, cv=10, scoring='accuracy',
+    x_train, y_train = x_train[indices], y_train[indices]
+    train_sizes = np.arange(0.05, 1.05, 0.05)
+    x_range = train_sizes*3840
+    train_sizes, train_scores, test_scores = learning_curve(LinearClassifier, x_train, y_train, cv=10, scoring='accuracy',
                                                             n_jobs=-1,
                                                             train_sizes=train_sizes)
     train_scores_mean = np.mean(train_scores, axis=1)
     train_scores_std = np.std(train_scores, axis=1)
     test_scores_mean = np.mean(test_scores, axis=1)
     test_scores_std = np.std(test_scores, axis=1)
-    plt.figure(figsize=(20, 5))
+    plt.figure(figsize=(10, 7))
+    plt.ylim(0.8, 1.0)
+    plt.yticks(np.arange(0.8, 1.001, 0.01))
+    plt.ylabel("Accuracy")
+    plt.xlabel("Training Examples")
+    plt.title("Learning Curve (SVM, Linear Kernel, C=0.3511)")
+    plt.xticks(x_range)
     plt.fill_between(train_sizes, train_scores_mean - train_scores_std,
                      train_scores_mean + train_scores_std, alpha=0.1,
                      color="r")
@@ -182,42 +83,53 @@ def plot_learning_curve(x, y):
     return 0
 
 
-def cross_validation(LinearClassifier, training_images, training_labels):
-    C_value = np.arange(1, 20, 1)
-    scores = []
-    scoresSTD = []
-    for C in C_value:
-        LinearClassifier.C = C
-        current_score = cross_val_score(LinearClassifier, training_images, training_labels, n_jobs=1)
-        scores.append(np.mean(current_score))
-        scoresSTD.append(np.std(current_score))
-    pass
-    plt.figure(figsize=(10, 10))
-    plt.plot(C_value, scores)
-    plt.plot(C_value, np.array(scores) + np.array(scoresSTD), 'b--')
-    plt.plot(C_value, np.array(scores) - np.array(scoresSTD), 'b--')
-    plt.xticks(np.arange(0, 20, 1))
-    plt.xlabel('C parameter')
-    plt.yticks(np.arange(0, 1, 0.1))
-    plt.ylabel('Cross Validation accuracy')
-    plt.show()
-    scores.clear()
-    scoresSTD.clear()
-    Models = ['linear', 'poly', 'rbf', 'sigmoid']
-    for i in range(len(Models)):
-        LinearClassifier.kernel = Models[i]
-        current_score = cross_val_score(LinearClassifier, training_images, training_labels, n_jobs=1)
-        scores.append(np.mean(current_score))
-        scoresSTD.append(np.std(current_score))
-    pass
-    plt.figure(figsize=(10, 10))
-    plt.plot(Models, scores)
-    plt.plot(Models, np.array(scores) + np.array(scoresSTD), 'b--')
-    plt.plot(Models, np.array(scores) - np.array(scoresSTD), 'b--')
-    plt.xlabel('C parameter')
-    plt.yticks(np.arange(0, 1, 0.1))
-    plt.ylabel('Cross Validation accuracy')
-    plt.show()
+def validation_curve_for_different_parameters_and_figures(tr_X, tr_Y):
+    """# Validation curve for C parameter
+    LinearClassifier = SVC(kernel='linear')
+    C_range = np.logspace(-6, 2, num=100)
+    train_scores, test_scores = validation_curve(
+        LinearClassifier, tr_X, tr_Y, param_name="C", param_range=C_range,
+        scoring="accuracy", n_jobs=-1, verbose=3, cv=10)
+    train_scores_mean = np.mean(train_scores, axis=1)
+    test_scores_mean = np.mean(test_scores, axis=1)
+    plt.figure(figsize=(8, 6))
+    plt.title("Validation Curve with SVM")
+    plt.xlabel("C")
+    plt.ylabel("Score")
+    plt.ylim(0.45, 1.0)
+    plt.yticks(np.arange(0.45, 1.01, 0.05))
+    plt.xlim(0.000001, 100)
+    lw = 2
+    plt.semilogx(C_range, train_scores_mean, label="Training score",
+                 color="darkorange", lw=lw)
+    plt.semilogx(C_range, test_scores_mean, label="Cross-validation score",
+                 color="navy", lw=lw)
+    plt.legend(loc="best")
+    plt.grid()
+    plt.show()"""
+
+    # Validation curve for kernel parameter parameter
+    """Kernel_parameter = ["linear", "poly", "rbf", "sigmoid"]
+    LinearClassifier = SVC()
+    train_scores, test_scores = validation_curve(
+        LinearClassifier, tr_X, tr_Y, param_name="kernel", param_range=Kernel_parameter,
+        scoring="accuracy", n_jobs=-1, verbose=3, cv=10)
+    train_scores_mean = np.mean(train_scores, axis=1)
+    test_scores_mean = np.mean(test_scores, axis=1)
+    plt.figure(figsize=(8, 6))
+    plt.title("Validation Curve with SVM")
+    plt.xlabel("Kernel Function")
+    plt.ylabel("Score")
+    plt.ylim(0.6, 1.05)
+    plt.yticks(np.arange(0.6, 1.05, 0.05))
+    lw = 2
+    plt.plot(Kernel_parameter, train_scores_mean, marker="H", label="Training score",
+             color="darkorange", lw=lw)
+    plt.plot(Kernel_parameter, test_scores_mean, marker="s", label="Cross-validation score",
+             color="navy", lw=lw)
+    plt.legend(loc="best")
+    plt.grid()
+    plt.show()"""
 
 
 def Classifier(X, Y, test_X):
@@ -230,7 +142,7 @@ def Classifier(X, Y, test_X):
     y = np.array(y_data)
 
     # Initializing values and computing H. Note the 1. to force to float type
-    C = 1
+    C = 0.09540954763499938
     m, n = X.shape
     y = y.reshape(-1, 1) * 1.
     X_dash = y * X
@@ -252,24 +164,10 @@ def Classifier(X, Y, test_X):
     w = ((y * alphas).T @ X).reshape(-1, 1)
     S = (alphas > 0).flatten()
     b = y[S] - np.dot(X[S], w)
-    w = w.reshape(1, 136)
-    print('Alphas = ', alphas[alphas > 1e-4])
-    print('w = ', w.flatten())
+    w = w.reshape(1, 68)
     b = np.sum(b) / 3840
     y_pred = np.dot(w, test_X.T) + b
     return y_pred
-
-
-def Poly_data_mapping(x_train, y_train):
-    copy = x_train.copy()
-    for i in range(0, 136, 2):
-        x_train[:, i] = x_train[:, i] ** 2
-    for i in range(1, 136, 2):
-        x_train[:, i] = np.sqrt(2) * copy[:, 0] * x_train[:, 1]
-    for i in range(2, 204, 2):
-        np.insert(x_train, i, copy[:, i - 1] ** 2, axis=1)
-
-    return x_train
 
 
 def img_new_SVM(training_images, training_labels, test_images, test_labels):
@@ -282,13 +180,87 @@ def img_new_SVM(training_images, training_labels, test_images, test_labels):
             Y_pred.append(0)
         else:
             Y_pred.append(1)
-    print("My Linear Classifier Accuracy:", accuracy_score(Test_label, Y_pred))
+    print("Solver Linear Classifier Accuracy:", accuracy_score(Test_label, Y_pred))
 
 
-# Loading the data file
-training_images = np.load('A1_train_x_data.npy')
-training_labels = np.load('A1_train_y_data.npy')
-test_images = np.load('A1_test_x_data.npy')
-test_labels = np.load('A1_test_y_data.npy')
-img_SVM(training_images, training_labels, test_images, test_labels)
-img_new_SVM(training_images, training_labels, test_images, test_labels)
+def data_preprocessing(X, Y):
+    Y[Y == 0] = -1
+    tr_X, te_X, tr_Y, te_Y = train_test_split(X, Y, test_size=0.2)
+    tr_X = tr_X.reshape((3840, 68 * 2))
+    te_X = te_X.reshape((960, 68 * 2))
+    X = X.reshape(4800, 68 * 2)
+    scaler = StandardScaler()  # doctest: +SKIP
+    # Don't cheat - fit only on training data
+    scaler.fit(tr_X)  # doctest: +SKIP
+    X_train = scaler.transform(tr_X)  # doctest: +SKIP
+    # apply same transformation to test data
+    X_test = scaler.transform(te_X)
+    pca = PCA(n_components=68)
+    pca.fit(X_train)
+    X_train = pca.transform(X_train)
+    X_test = pca.transform(X_test)
+    all_data = scaler.transform(X)
+    all_data = pca.transform(all_data)
+    return X_train, X_test, tr_Y, te_Y, all_data
+
+
+def hypeparameters_determination(x_train, y_train):
+    param_grid = {'C': np.logspace(-4, 1, num=100),
+                  'kernel': ['linear']}
+    grid = GridSearchCV(SVC(), param_grid, refit=True, verbose=3, cv=10)
+    grid.fit(x_train, y_train)
+    grid_predictions = grid.predict(x_train)
+    print("Best parameters ", grid.best_params_)
+    return grid.best_params_
+
+
+# Evaluation of Model - Confusion Matrix Plot
+def plot_confusion_matrix(cm, target_names, title='Confusion matrix', cmap=None):
+    tn, fp, fn, tp = cm.ravel()
+    Accuracy = (tn + tp) * 100 / (tp + tn + fp + fn)
+    Precision = tp / (tp + fp)
+    Recall = tp / (tp + fn)
+    f1 = (2 * Precision * Recall) / (Precision + Recall)
+
+    if cmap is None:
+        cmap = plt.get_cmap('Blues')
+
+    plt.figure(figsize=(12, 10))
+    plt.imshow(cm, interpolation='nearest', cmap=cmap, aspect='equal')
+    plt.title(title)
+    plt.colorbar()
+
+    if target_names is not None:
+        tick_marks = np.arange(2)
+        plt.xticks(tick_marks, target_names)
+        plt.yticks(tick_marks, target_names)
+
+    thresh = cm.max() / 2
+    k = -0.25
+    for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
+        plt.text(x=j * 0.5 + 0.25 + k, y=i * 0.5 + 0.25, s=cm[i, j], horizontalalignment="center",
+                 verticalalignment="center",
+                 color="white" if cm[i, j] > thresh else "black")
+        k = k * -1
+
+    plt.tight_layout()
+    plt.ylabel('True label')
+    plt.xlabel(
+        'Predicted label\n\n accuracy={:0.4f}\n Precision={:0.4f}\n Recall={:0.4f}\n F1={:0.4f} '.format(Accuracy,
+                                                                                                         Precision,
+                                                                                                         Recall, f1))
+    plt.show()
+
+
+training_images = np.load('Features_data.npy')
+gender_labels = np.load('Gender_labels.npy')
+tr_X, te_X, tr_Y, te_Y, all_data = data_preprocessing(training_images, gender_labels)
+"param = hypeparameters_determination(tr_X, tr_Y)"
+"validation_curve_for_different_parameters_and_figures(tr_X, tr_Y)"
+plot_learning_curve(tr_X, tr_Y)
+pred, model = img_SVM(tr_X, tr_Y, te_X, te_Y)
+plot_confusion_matrix(confusion_matrix.confusion_matrix(te_Y, pred, [1, -1]),
+                      target_names=['male', 'female'], title="Confusion Matrix")
+
+img_SVM(tr_X, tr_Y, te_X, te_Y)
+"img_new_SVM(tr_X, tr_Y, te_X, te_Y)"
