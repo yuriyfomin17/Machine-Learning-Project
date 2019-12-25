@@ -15,6 +15,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.model_selection import validation_curve
 import itertools
 import confusion_matrix
+from sklearn.linear_model import ElasticNetCV
 
 
 def img_SVM(training_data, training_labels, test_data, test_labels):
@@ -184,24 +185,43 @@ def img_new_SVM(training_images, training_labels, test_images, test_labels):
 
 
 def data_preprocessing(X, Y):
+    # scaling of data
+
     Y[Y == 0] = -1
-    tr_X, te_X, tr_Y, te_Y = train_test_split(X, Y, test_size=0.2)
-    tr_X = tr_X.reshape((3840, 68 * 2))
-    te_X = te_X.reshape((960, 68 * 2))
-    X = X.reshape(4800, 68 * 2)
-    scaler = StandardScaler()  # doctest: +SKIP
+    X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=0.2)
+    X_train = X_train.reshape((3840, 68 * 2))
+    X_test = X_test.reshape((960, 68 * 2))
+    """scaler = StandardScaler()  # doctest: +SKIP
     # Don't cheat - fit only on training data
-    scaler.fit(tr_X)  # doctest: +SKIP
-    X_train = scaler.transform(tr_X)  # doctest: +SKIP
+    scaler.fit(X_train)  # doctest: +SKIP
+    X_train = scaler.transform(X_train)  # doctest: +SKIP
     # apply same transformation to test data
-    X_test = scaler.transform(te_X)
+    X_test = scaler.transform(X_test)"""
+    # compute the minimum value per feature on the training set
+    min_on_training = X_train.min(axis=0)
+    # compute the range of each feature (max - min) on the training set
+    range_on_training = (X_train - min_on_training).max(axis=0)
+    # subtract the min, and divide by range
+    # afterward, min=0 and max=1 for each feature
+    X_train = (X_train - min_on_training) / range_on_training
+    X_test = (X_test - min_on_training) / range_on_training
+
+    # PCA analysis
+
     pca = PCA(n_components=68)
     pca.fit(X_train)
     X_train = pca.transform(X_train)
     X_test = pca.transform(X_test)
-    all_data = scaler.transform(X)
-    all_data = pca.transform(all_data)
-    return X_train, X_test, tr_Y, te_Y, all_data
+
+    # Feature selection using lasso and ridge regression
+
+    ElasticNet = ElasticNetCV(cv=10, random_state=0)
+    ElasticNet.fit(X_train, Y_train)
+    all_features = ElasticNet.coef_
+    not_important_features_indices = np.where(all_features == 0)[0]
+    X_train = np.delete(X_train, not_important_features_indices, axis=1)
+    X_test = np.delete(X_test, not_important_features_indices, axis=1)
+    return X_train, X_test, Y_train, Y_test
 
 
 def hypeparameters_determination(x_train, y_train):
@@ -254,10 +274,10 @@ def plot_confusion_matrix(cm, target_names, title='Confusion matrix', cmap=None)
 
 training_images = np.load('Features_data.npy')
 gender_labels = np.load('Gender_labels.npy')
-tr_X, te_X, tr_Y, te_Y, all_data = data_preprocessing(training_images, gender_labels)
+tr_X, te_X, tr_Y, te_Y = data_preprocessing(training_images, gender_labels)
 "param = hypeparameters_determination(tr_X, tr_Y)"
 "validation_curve_for_different_parameters_and_figures(tr_X, tr_Y)"
-plot_learning_curve(tr_X, tr_Y)
+"plot_learning_curve(tr_X, tr_Y)"
 pred, model = img_SVM(tr_X, tr_Y, te_X, te_Y)
 plot_confusion_matrix(confusion_matrix.confusion_matrix(te_Y, pred, [1, -1]),
                       target_names=['male', 'female'], title="Confusion Matrix")
