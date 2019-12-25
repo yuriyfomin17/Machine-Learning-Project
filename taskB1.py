@@ -2,54 +2,70 @@ import numpy as np
 from sklearn.metrics import classification_report, accuracy_score
 from sklearn.svm import SVC
 from sklearn import svm
+from sklearn.decomposition import PCA
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import ElasticNetCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import GridSearchCV
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.neural_network import MLPClassifier
+
+
 # neural network class definition
 
-"""def predict_class(X, classifiers):
-    predictions = np.arange(1563)
-    for k in range(len(classifiers)):
-        current_predict = classifiers[k].predict(X)
-        indices = np.where(current_predict == 1)
-        predictions[indices] = k
-    pass
-    return predictions"""
+
+def data_preprocessing(X, Y):
+    # scaling of data
+
+    X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=0.2)
+    X_train = X_train.reshape((6252, 68 * 2))
+    X_test = X_test.reshape((1563, 68 * 2))
+    scaler = StandardScaler()  # doctest: +SKIP
+    # Don't cheat - fit only on training data
+    scaler.fit(X_train)  # doctest: +SKIP
+    X_train = scaler.transform(X_train)  # doctest: +SKIP
+    # apply same transformation to test data
+    X_test = scaler.transform(X_test)
+
+    # PCA analysis
+
+    """pca = PCA(n_components=68)
+    pca.fit(X_train)
+    X_train = pca.transform(X_train)
+    X_test = pca.transform(X_test)
+
+    # Feature selection using lasso and ridge regression
+
+    ElasticNet = ElasticNetCV(cv=10, random_state=0)
+    ElasticNet.fit(X_train, Y_train)
+    all_features = ElasticNet.coef_
+    not_important_features_indices = np.where(all_features == 0)[0]
+    X_train = np.delete(X_train, not_important_features_indices, axis=1)
+    X_test = np.delete(X_test, not_important_features_indices, axis=1)"""
+    return X_train, X_test, Y_train, Y_test
 
 
-def predict_class(X, classifiers):
-    predictions = np.zeros((X.shape[0], len(classifiers)))
-    for idx, clf in enumerate(classifiers):
-        predictions[:, idx] = clf.predict(X)
-    # returns the class number if only one classifier predicted it # returns zero otherwise.
-    return np.argmax(predictions, axis=1)
+def hypeparameters_determination(x_train, y_train):
+    param_grid = {'C': np.logspace(-4, 1, num=100),
+                  'kernel': ['linear', 'rbf', 'sigmoid', 'poly'], 'degree': np.arange(2, 3, 1), 'gamma': np.logspace(-4, 1, num=100)}
+    grid = GridSearchCV(SVC(), param_grid, refit=True, verbose=3, cv=10)
+    grid.fit(x_train, y_train)
+    grid_predictions = grid.predict(x_train)
+    print("Best parameters ", grid.best_params_)
+    # Train predictions accuracy is shown
+    print("Train Accuracy after hypeparameters are determined: ", accuracy_score(y_train, grid_predictions))
+
+    return grid.best_params_
 
 
 training_images = np.load('Cartoon_Features_data.npy')
 face_labels = np.load('All_face_types.npy')
+tr_X, te_X, tr_Y, te_Y = data_preprocessing(training_images, face_labels)
+"""model = GradientBoostingClassifier(random_state=0, max_depth=5, learning_rate=0.1)
+model.fit(tr_X, tr_Y)
+print("Accuracy on training set: {:.3f}".format(model.score(tr_X, tr_Y)))
+print("Accuracy on test set: {:.3f}".format(model.score(te_X, te_Y)))"""
 
-tr_X = training_images[:6252]
-tr_Y = face_labels[:6252]
-te_X = training_images[6252:]
-te_Y = face_labels[6252:]
-
-tr_X = tr_X.reshape((6252, 68 * 2))
-te_X = te_X.reshape((1563, 68 * 2))
-
-tr_Y0 = np.where(tr_Y == 0, 1, -1)
-tr_Y1 = np.where(tr_Y == 1, 1, -1)
-tr_Y2 = np.where(tr_Y == 2, 1, -1)
-tr_Y3 = np.where(tr_Y == 3, 1, -1)
-tr_Y4 = np.where(tr_Y == 4, 1, -1)
-y_list = [tr_Y0, tr_Y1, tr_Y2, tr_Y3, tr_Y4]
-classifiers_list = []
-for i in range(5):
-    LinearClassifier = SVC(C=0.001, kernel='linear')
-    LinearClassifier.fit(tr_X, y_list[i])
-    classifiers_list.append(LinearClassifier)
-
-y_pred = predict_class(te_X, classifiers_list)
-print("My Linear Classifier Accuracy:", accuracy_score(te_Y, y_pred))
-
-
-LinearClassifier = svm.LinearSVC(C=0.001, multi_class='crammer_singer')
-LinearClassifier.fit(tr_X, tr_Y)
-pred = LinearClassifier.predict(te_X)
-print("Crammer_singer:", accuracy_score(te_Y, pred))
+mlp = MLPClassifier(solver='lbfgs',hidden_layer_sizes=[300, 100], random_state=0, alpha=100, max_iter=2000).fit(tr_X, tr_Y)
+print("Accuracy on training set: {:.3f}".format(mlp.score(tr_X, tr_Y)))
+print("Accuracy on test set: {:.3f}".format(mlp.score(te_X, te_Y)))
